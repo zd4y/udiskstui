@@ -155,6 +155,8 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.exit(),
             KeyCode::Char('j') | KeyCode::Down => self.next_device(),
             KeyCode::Char('k') | KeyCode::Up => self.prev_device(),
+            KeyCode::Char('G') | KeyCode::End => self.last_device(),
+            KeyCode::Char('g') | KeyCode::Home => self.first_device(),
             KeyCode::Char('m') => self.mount()?,
             KeyCode::Char('u') => self.unmount()?,
             KeyCode::Enter => {
@@ -185,6 +187,18 @@ impl App {
         if self.selected_device_index > 0 {
             self.selected_device_index -= 1;
         }
+    }
+
+    fn last_device(&mut self) {
+        if self.devices.is_empty() {
+            return;
+        }
+
+        self.selected_device_index = self.devices.len() - 1;
+    }
+
+    fn first_device(&mut self) {
+        self.selected_device_index = 0;
     }
 
     fn receive_udisks_messages(&mut self) -> Result<()> {
