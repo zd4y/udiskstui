@@ -64,7 +64,7 @@ pub enum UDisks2Message {
     AlreadyMounted(usize, String),
     AlreadyUnmounted(usize),
     Devices(Vec<Device>),
-    ErrorOccurred,
+    Err(String),
 }
 
 impl App {
@@ -90,9 +90,15 @@ impl App {
             self.handle_events().wrap_err("handling events failed")?;
         }
         self.sender.blocking_send(TuiMessage::Quit)?;
+        terminal.draw(|frame| frame.render_widget(Paragraph::new("exiting..."), frame.size()))?;
         // handle remaining messages before exiting
         while let Some(msg) = self.receiver.blocking_recv() {
-            self.handle_udisks_message(msg)?;
+            match msg {
+                UDisks2Message::Err(err_msg) => {
+                    bail!(err_msg)
+                }
+                _ => self.handle_udisks_message(msg)?,
+            }
         }
         Ok(())
     }
@@ -244,8 +250,8 @@ impl App {
                 self.state_msg = Some(format!("Already unmounted {}", device.name));
                 Ok(())
             }
-            UDisks2Message::ErrorOccurred => {
-                self.exit();
+            UDisks2Message::Err(error_msg) => {
+                self.state_msg = Some(format!("Error: {}", error_msg));
                 Ok(())
             }
         }
@@ -256,10 +262,10 @@ impl App {
             return Ok(());
         }
 
+        let device = &self.devices[self.selected_device_index];
         let msg = if let Some(passphrase) = self.passphrase.take() {
             TuiMessage::UnlockAndMount(self.selected_device_index, passphrase)
         } else {
-            let device = &self.devices[self.selected_device_index];
             match device.state {
                 DeviceState::Locked => {
                     self.reading_passphrase = true;
@@ -271,16 +277,23 @@ impl App {
 
         self.sender.blocking_send(msg)?;
 
+        self.state_msg = Some(format!("Mounting {}...", device.name));
+
         Ok(())
     }
 
-    fn unmount(&self) -> Result<()> {
+    fn unmount(&mut self) -> Result<()> {
         if self.devices.is_empty() {
             return Ok(());
         }
 
         self.sender
             .blocking_send(TuiMessage::Unmount(self.selected_device_index))?;
+
+        self.state_msg = Some(format!(
+            "Unmounting {}...",
+            &self.devices[self.selected_device_index].name
+        ));
         Ok(())
     }
 }

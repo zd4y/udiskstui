@@ -40,16 +40,20 @@ async fn main() -> Result<()> {
         while let Some(msg) = tui_receiver.recv().await {
             match msg {
                 TuiMessage::Mount(device) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // udisks_sender.send(UDisks2Message::Err("nope".to_string())).await?;
                     udisks_sender
                         .send(UDisks2Message::Mounted(device, "/example".to_string()))
                         .await?;
                 }
                 TuiMessage::Unmount(device) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     udisks_sender
                         .send(UDisks2Message::Unmounted(device))
                         .await?;
                 }
                 TuiMessage::UnlockAndMount(device, passphrase) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     udisks_sender
                         .send(UDisks2Message::UnlockedAndMounted(
                             device,
