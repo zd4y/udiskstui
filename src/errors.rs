@@ -14,12 +14,10 @@ pub fn install_hooks() -> color_eyre::Result<()> {
     }));
 
     let eyre_hook = eyre_hook.into_eyre_hook();
-    eyre::set_hook(Box::new(
-        move |error: &(dyn std::error::Error + 'static)| {
-            tui::restore().unwrap();
-            eyre_hook(error)
-        },
-    ))?;
+    eyre::set_hook(Box::new(move |error| {
+        // tui::restore().unwrap();
+        eyre_hook(error)
+    }))?;
 
     Ok(())
 }

@@ -34,13 +34,15 @@ pub struct App {
     receiver: Receiver<UDisks2Message>,
 }
 
+#[derive(Debug)]
 pub struct Device {
     pub name: String,
     pub label: String,
-    pub size: u64,
+    pub size: String,
     pub state: DeviceState,
 }
 
+#[derive(Debug)]
 pub enum DeviceState {
     Locked,
     UnmountedUnlocked,
@@ -52,6 +54,7 @@ pub enum TuiMessage {
     Mount(usize),
     Unmount(usize),
     UnlockAndMount(usize, String),
+    Refresh,
     Quit,
 }
 
@@ -159,6 +162,7 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.first_device(),
             KeyCode::Char('m') => self.mount()?,
             KeyCode::Char('u') => self.unmount()?,
+            KeyCode::Char('r') => self.refresh()?,
             KeyCode::Enter => {
                 self.mount()?;
                 self.print_on_exit = true;
@@ -213,6 +217,10 @@ impl App {
         match msg {
             UDisks2Message::Devices(devices) => {
                 self.devices = devices;
+                self.selected_device_index = 0;
+                self.state_msg = None;
+                self.exit_mount_point = None;
+                self.print_on_exit = false;
                 Ok(())
             }
             UDisks2Message::Mounted(idx, mount_point) => {
@@ -310,6 +318,19 @@ impl App {
         ));
         Ok(())
     }
+
+    fn refresh(&mut self) -> Result<()> {
+        self.devices.clear();
+        self.selected_device_index = 0;
+        self.passphrase = None;
+        self.reading_passphrase = false;
+        self.state_msg = None;
+        self.exit = false;
+        self.exit_mount_point = None;
+        self.print_on_exit = false;
+        self.sender.blocking_send(TuiMessage::Refresh)?;
+        Ok(())
+    }
 }
 
 impl Widget for &App {
@@ -336,7 +357,7 @@ impl Widget for &App {
                 Row::new([
                     Cell::new(d.name.as_str()),
                     Cell::new(d.label.as_str()),
-                    Cell::new(d.size.to_string()),
+                    Cell::new(d.size.as_str()),
                     Cell::new(d.state.to_string()),
                 ])
             })
@@ -346,7 +367,7 @@ impl Widget for &App {
         let widths = [
             Constraint::Fill(3),
             Constraint::Fill(3),
-            Constraint::Fill(1),
+            Constraint::Max(10),
             Constraint::Fill(2),
         ];
         let mut state = TableState::new().with_selected(self.selected_device_index + 1);
@@ -376,8 +397,8 @@ impl Widget for &App {
                     "<Enter>".bold().blue(),
                     " Mount and exit printing mount point".into(),
                     " | ".dark_gray(),
-                    "q".bold().blue(),
-                    " Quit".into(),
+                    "r".bold().blue(),
+                    " Refresh".into(),
                 ]))
                 .alignment(Alignment::Center),
             )
