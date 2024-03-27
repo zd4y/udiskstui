@@ -93,7 +93,12 @@ impl App {
             self.handle_events().wrap_err("handling events failed")?;
         }
         self.sender.blocking_send(TuiMessage::Quit)?;
-        terminal.draw(|frame| frame.render_widget(Paragraph::new("exiting..."), frame.size()))?;
+        terminal.draw(|frame| {
+            frame.render_widget(
+                Paragraph::new(self.state_msg.as_deref().unwrap_or("exiting...")),
+                frame.size(),
+            )
+        })?;
         // handle remaining messages before exiting
         while let Some(msg) = self.receiver.blocking_recv() {
             match msg {
