@@ -36,7 +36,6 @@ impl Device {
                 .build()
                 .await?;
             let cleartext_device = proxy.cleartext_device().await?;
-            // TODO: change name, label, etc
             if cleartext_device.len() > 1 {
                 cleartext_device
             } else {
@@ -96,7 +95,6 @@ impl Device {
                 }
             }
             BlockDeviceKind::Encrypted => {
-                // TODO: change name, label, etc
                 let proxy = EncryptedProxy::builder(self.client.conn())
                     .path(&self.block_device.path)?
                     .build()
