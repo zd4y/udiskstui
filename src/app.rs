@@ -371,10 +371,6 @@ impl App {
         let l = self.tasks.len();
         let mut i = 0;
         while let Some(task) = self.tasks.pop_front() {
-            if i >= l {
-                self.tasks.push_back(task);
-                break;
-            }
             if task.is_finished() {
                 match self.runtime.block_on(task)? {
                     Ok(()) => {}
@@ -387,6 +383,9 @@ impl App {
                 self.tasks.push_back(task)
             }
             i += 1;
+            if i >= l {
+                break;
+            }
         }
         Ok(())
     }
