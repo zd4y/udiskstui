@@ -108,7 +108,14 @@ impl App {
         })?;
 
         while let Some(task) = self.tasks.pop_front() {
-            self.runtime.block_on(task)??;
+            match self.runtime.block_on(task)? {
+                Ok(()) => {}
+                Err(err) => {
+                    self.state_msg = Some(format!("Error: {err}"));
+                    self.exit = false;
+                    return self.run(terminal);
+                }
+            }
         }
 
         Ok(())
