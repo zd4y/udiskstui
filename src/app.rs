@@ -66,6 +66,7 @@ pub enum Message {
     AlreadyMounted(usize, String),
     AlreadyUnmounted(usize),
     Devices(Vec<GuiDevice>),
+    PassphraseRequired(usize),
 }
 
 impl App {
@@ -298,6 +299,11 @@ impl App {
             Message::AlreadyUnmounted(idx) => {
                 let device = &self.gui_devices[idx];
                 self.state_msg = Some(format!("Already unmounted {}", device.name));
+                Ok(())
+            }
+            Message::PassphraseRequired(idx) => {
+                self.reading_passphrase = true;
+                self.selected_device_index = idx;
                 Ok(())
             }
         }

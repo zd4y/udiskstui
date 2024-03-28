@@ -39,9 +39,11 @@ impl Device {
             if cleartext_device.len() > 1 {
                 cleartext_device
             } else {
-                let cleartext_device = proxy
-                    .unlock(passphrase.as_ref().unwrap(), Default::default())
-                    .await?;
+                let passphrase = match passphrase {
+                    Some(p) => p,
+                    None => return Ok(Message::PassphraseRequired(idx)),
+                };
+                let cleartext_device = proxy.unlock(&passphrase, Default::default()).await?;
                 let proxy = FilesystemProxy::builder(self.client.conn())
                     .path(&cleartext_device)?
                     .build()
