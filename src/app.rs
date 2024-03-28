@@ -240,27 +240,32 @@ impl App {
             }
             UDisks2Message::Mounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Mounted;
                 self.state_msg = Some(format!("Mounted {} at {}", device.name, mount_point));
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
             UDisks2Message::Unmounted(idx) => {
                 let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Unmounted;
                 self.state_msg = Some(format!("Unmounted {}", device.name));
                 Ok(())
             }
             UDisks2Message::Locked(idx) => {
                 let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Locked;
                 self.state_msg = Some(format!("Locked {}", device.name));
                 Ok(())
             }
             UDisks2Message::UnmountedAndLocked(idx) => {
                 let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Locked;
                 self.state_msg = Some(format!("Unmounted and locked {}", device.name));
                 Ok(())
             }
             UDisks2Message::UnlockedAndMounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Mounted;
                 self.state_msg = Some(format!(
                     "Unlocked and mounted {} at {}",
                     device.name, mount_point
