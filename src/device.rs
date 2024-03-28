@@ -44,11 +44,25 @@ impl Device {
                     .unlock(passphrase.as_ref().unwrap(), Default::default())
                     .await?;
                 let proxy = FilesystemProxy::builder(self.client.conn())
-                    .path(cleartext_device)?
+                    .path(&cleartext_device)?
                     .build()
                     .await?;
                 let mount_point = proxy.mount(Default::default()).await?;
-                return Ok(Message::UnlockedAndMounted(idx, mount_point));
+
+                let proxy = BlockProxy::builder(self.client.conn())
+                    .path(cleartext_device)?
+                    .build()
+                    .await?;
+                let name = Self::get_name(&proxy).await?;
+                let label = Self::get_label(&proxy).await?;
+                let size = Self::get_size(&proxy).await?;
+                return Ok(Message::UnlockedAndMounted(
+                    idx,
+                    mount_point,
+                    name,
+                    label,
+                    size,
+                ));
             }
         } else {
             self.block_device.path.clone()
@@ -99,7 +113,16 @@ impl Device {
                     }
                     filesystem_proxy.unmount(Default::default()).await?;
                     proxy.lock(Default::default()).await?;
-                    Ok(Message::UnmountedAndLocked(idx))
+
+                    let proxy = BlockProxy::builder(self.client.conn())
+                        .path(&self.block_device.path)?
+                        .build()
+                        .await?;
+                    let name = Self::get_name(&proxy).await?;
+                    let label = Self::get_label(&proxy).await?;
+                    let size = Self::get_size(&proxy).await?;
+
+                    Ok(Message::UnmountedAndLocked(idx, name, label, size))
                 } else {
                     Ok(Message::AlreadyUnmounted(idx))
                 }

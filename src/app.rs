@@ -29,7 +29,7 @@ use tokio::{
 use crate::{
     device::{Device, DeviceState},
     tui,
-    udisks2::{BlockDevice, BlockProxy, Client},
+    udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy},
 };
 
 pub struct App {
@@ -61,8 +61,8 @@ pub enum Message {
     Mounted(usize, String),
     Unmounted(usize),
     Locked(usize),
-    UnmountedAndLocked(usize),
-    UnlockedAndMounted(usize, String),
+    UnmountedAndLocked(usize, String, String, String),
+    UnlockedAndMounted(usize, String, String, String, String),
     AlreadyMounted(usize, String),
     AlreadyUnmounted(usize),
     Devices(Vec<GuiDevice>),
@@ -257,14 +257,20 @@ impl App {
                 self.state_msg = Some(format!("Locked {}", device.name));
                 Ok(())
             }
-            Message::UnmountedAndLocked(idx) => {
+            Message::UnmountedAndLocked(idx, name, label, size) => {
                 let device = &mut self.gui_devices[idx];
+                device.name = name;
+                device.label = label;
+                device.size = size;
                 device.state = DeviceState::Locked;
                 self.state_msg = Some(format!("Unmounted and locked {}", device.name));
                 Ok(())
             }
-            Message::UnlockedAndMounted(idx, mount_point) => {
+            Message::UnlockedAndMounted(idx, mount_point, name, label, size) => {
                 let device = &mut self.gui_devices[idx];
+                device.name = name;
+                device.label = label;
+                device.size = size;
                 device.state = DeviceState::Mounted;
                 self.state_msg = Some(format!(
                     "Unlocked and mounted {} at {}",
@@ -498,8 +504,23 @@ impl Widget for &App {
 
 impl GuiDevice {
     async fn new(client: &Client, block_device: &BlockDevice) -> Result<Self> {
+        let path = match block_device.kind {
+            BlockDeviceKind::Filesystem => block_device.path.clone(),
+            BlockDeviceKind::Encrypted => {
+                let encrypted_proxy = EncryptedProxy::builder(client.conn())
+                    .path(&block_device.path)?
+                    .build()
+                    .await?;
+                let cleartext_device = encrypted_proxy.cleartext_device().await?;
+                if cleartext_device.len() > 1 {
+                    cleartext_device
+                } else {
+                    block_device.path.clone()
+                }
+            }
+        };
         let proxy = BlockProxy::builder(client.conn())
-            .path(&block_device.path)?
+            .path(path)?
             .build()
             .await?;
         let name = Device::get_name(&proxy).await?;
