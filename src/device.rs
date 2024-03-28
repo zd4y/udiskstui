@@ -29,11 +29,7 @@ impl Device {
         })
     }
 
-    pub async fn mount(
-        &mut self,
-        idx: usize,
-        passphrase: Option<String>,
-    ) -> Result<UDisks2Message> {
+    pub async fn mount(&self, idx: usize, passphrase: Option<String>) -> Result<UDisks2Message> {
         let object_path = if let BlockDeviceKind::Encrypted = self.block_device.kind {
             let proxy = EncryptedProxy::builder(self.client.conn())
                 .path(&self.block_device.path)?
@@ -71,7 +67,7 @@ impl Device {
         }
     }
 
-    pub async fn unmount(&mut self, idx: usize) -> Result<UDisks2Message> {
+    pub async fn unmount(&self, idx: usize) -> Result<UDisks2Message> {
         match self.block_device.kind {
             BlockDeviceKind::Filesystem => {
                 let proxy = FilesystemProxy::builder(self.client.conn())
