@@ -43,8 +43,8 @@ pub struct App {
     exit: bool,
     exit_mount_point: Option<String>,
     print_on_exit: bool,
-    sender: Sender<UDisks2Message>,
-    receiver: Receiver<UDisks2Message>,
+    sender: Sender<Message>,
+    receiver: Receiver<Message>,
     runtime: Runtime,
     tasks: VecDeque<JoinHandle<Result<()>>>,
 }
@@ -57,7 +57,7 @@ pub struct GuiDevice {
     state: DeviceState,
 }
 
-pub enum UDisks2Message {
+pub enum Message {
     Mounted(usize, String),
     Unmounted(usize),
     Locked(usize),
@@ -228,9 +228,9 @@ impl App {
         }
     }
 
-    fn handle_udisks_message(&mut self, msg: UDisks2Message) -> Result<()> {
+    fn handle_udisks_message(&mut self, msg: Message) -> Result<()> {
         match msg {
-            UDisks2Message::Devices(devices) => {
+            Message::Devices(devices) => {
                 self.gui_devices = devices;
                 self.selected_device_index = 0;
                 self.state_msg = None;
@@ -238,32 +238,32 @@ impl App {
                 self.print_on_exit = false;
                 Ok(())
             }
-            UDisks2Message::Mounted(idx, mount_point) => {
+            Message::Mounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Mounted;
                 self.state_msg = Some(format!("Mounted {} at {}", device.name, mount_point));
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
-            UDisks2Message::Unmounted(idx) => {
+            Message::Unmounted(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Unmounted;
                 self.state_msg = Some(format!("Unmounted {}", device.name));
                 Ok(())
             }
-            UDisks2Message::Locked(idx) => {
+            Message::Locked(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Locked;
                 self.state_msg = Some(format!("Locked {}", device.name));
                 Ok(())
             }
-            UDisks2Message::UnmountedAndLocked(idx) => {
+            Message::UnmountedAndLocked(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Locked;
                 self.state_msg = Some(format!("Unmounted and locked {}", device.name));
                 Ok(())
             }
-            UDisks2Message::UnlockedAndMounted(idx, mount_point) => {
+            Message::UnlockedAndMounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Mounted;
                 self.state_msg = Some(format!(
@@ -273,7 +273,7 @@ impl App {
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
-            UDisks2Message::AlreadyMounted(idx, mount_point) => {
+            Message::AlreadyMounted(idx, mount_point) => {
                 let device = &self.gui_devices[idx];
                 self.state_msg = Some(format!(
                     "Already mounted {} at {}",
@@ -282,7 +282,7 @@ impl App {
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
-            UDisks2Message::AlreadyUnmounted(idx) => {
+            Message::AlreadyUnmounted(idx) => {
                 let device = &self.gui_devices[idx];
                 self.state_msg = Some(format!("Already unmounted {}", device.name));
                 Ok(())
@@ -359,7 +359,7 @@ impl App {
             let mut devices = devices_lock.write().await;
             devices.clear();
             *devices = new_devices;
-            sender.send(UDisks2Message::Devices(gui_devices)).await?;
+            sender.send(Message::Devices(gui_devices)).await?;
 
             Ok(())
         });

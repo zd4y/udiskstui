@@ -2,7 +2,7 @@ use color_eyre::Result;
 use humansize::{format_size, DECIMAL};
 
 use crate::{
-    app::UDisks2Message,
+    app::Message,
     udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
 };
 
@@ -29,7 +29,7 @@ impl Device {
         })
     }
 
-    pub async fn mount(&self, idx: usize, passphrase: Option<String>) -> Result<UDisks2Message> {
+    pub async fn mount(&self, idx: usize, passphrase: Option<String>) -> Result<Message> {
         let object_path = if let BlockDeviceKind::Encrypted = self.block_device.kind {
             let proxy = EncryptedProxy::builder(self.client.conn())
                 .path(&self.block_device.path)?
@@ -48,7 +48,7 @@ impl Device {
                     .build()
                     .await?;
                 let mount_point = proxy.mount(Default::default()).await?;
-                return Ok(UDisks2Message::UnlockedAndMounted(idx, mount_point));
+                return Ok(Message::UnlockedAndMounted(idx, mount_point));
             }
         } else {
             self.block_device.path.clone()
@@ -60,14 +60,14 @@ impl Device {
             .await?;
         if let Some(mount_point) = proxy.mount_points().await?.first() {
             let mount_point = dbus_u8_array_to_str(mount_point)?.to_string();
-            Ok(UDisks2Message::AlreadyMounted(idx, mount_point))
+            Ok(Message::AlreadyMounted(idx, mount_point))
         } else {
             let mount_point = proxy.mount(Default::default()).await?;
-            Ok(UDisks2Message::Mounted(idx, mount_point))
+            Ok(Message::Mounted(idx, mount_point))
         }
     }
 
-    pub async fn unmount(&self, idx: usize) -> Result<UDisks2Message> {
+    pub async fn unmount(&self, idx: usize) -> Result<Message> {
         match self.block_device.kind {
             BlockDeviceKind::Filesystem => {
                 let proxy = FilesystemProxy::builder(self.client.conn())
@@ -75,10 +75,10 @@ impl Device {
                     .build()
                     .await?;
                 if proxy.mount_points().await?.is_empty() {
-                    Ok(UDisks2Message::AlreadyUnmounted(idx))
+                    Ok(Message::AlreadyUnmounted(idx))
                 } else {
                     proxy.unmount(Default::default()).await?;
-                    Ok(UDisks2Message::Unmounted(idx))
+                    Ok(Message::Unmounted(idx))
                 }
             }
             BlockDeviceKind::Encrypted => {
@@ -95,13 +95,13 @@ impl Device {
                         .await?;
                     if filesystem_proxy.mount_points().await?.is_empty() {
                         proxy.lock(Default::default()).await?;
-                        return Ok(UDisks2Message::Locked(idx));
+                        return Ok(Message::Locked(idx));
                     }
                     filesystem_proxy.unmount(Default::default()).await?;
                     proxy.lock(Default::default()).await?;
-                    Ok(UDisks2Message::UnmountedAndLocked(idx))
+                    Ok(Message::UnmountedAndLocked(idx))
                 } else {
-                    Ok(UDisks2Message::AlreadyUnmounted(idx))
+                    Ok(Message::AlreadyUnmounted(idx))
                 }
             }
         }
