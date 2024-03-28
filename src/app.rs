@@ -43,7 +43,7 @@ pub struct App {
     exit: bool,
     exit_mount_point: Option<String>,
     print_on_exit: bool,
-    sender: Sender<Message>,
+    sender: Option<Sender<Message>>,
     receiver: Receiver<Message>,
     runtime: Runtime,
     tasks: VecDeque<JoinHandle<Result<()>>>,
@@ -84,7 +84,7 @@ impl App {
             exit: false,
             exit_mount_point: None,
             print_on_exit: false,
-            sender,
+            sender: Some(sender),
             receiver,
             runtime,
             tasks: VecDeque::new(),
@@ -107,6 +107,7 @@ impl App {
             )
         })?;
 
+        // check remaining tasks
         while let Some(task) = self.tasks.pop_front() {
             match self.runtime.block_on(task)? {
                 Ok(()) => {}
@@ -116,6 +117,12 @@ impl App {
                     return self.run(terminal);
                 }
             }
+        }
+
+        // handle remaining messages
+        drop(self.sender.take());
+        while let Some(msg) = self.receiver.blocking_recv() {
+            self.handle_message(msg)?;
         }
 
         Ok(())
@@ -222,13 +229,13 @@ impl App {
 
     fn receive_udisks_messages(&mut self) -> Result<()> {
         match self.receiver.try_recv() {
-            Ok(msg) => self.handle_udisks_message(msg),
+            Ok(msg) => self.handle_message(msg),
             Err(TryRecvError::Empty) => Ok(()),
             Err(err) => bail!("failed receiving message: {}", err),
         }
     }
 
-    fn handle_udisks_message(&mut self, msg: Message) -> Result<()> {
+    fn handle_message(&mut self, msg: Message) -> Result<()> {
         match msg {
             Message::Devices(devices) => {
                 self.gui_devices = devices;
@@ -299,7 +306,7 @@ impl App {
     fn mount(&mut self) -> Result<()> {
         let idx = self.selected_device_index;
         let devices_lock = self.devices.clone();
-        let sender = self.sender.clone();
+        let sender = self.sender.clone().unwrap();
         let passphrase = self.passphrase.take();
         self.spawn(async move {
             let mut devices = devices_lock.write().await;
@@ -318,7 +325,7 @@ impl App {
     fn unmount(&mut self) -> Result<()> {
         let idx = self.selected_device_index;
         let devices_lock = self.devices.clone();
-        let sender = self.sender.clone();
+        let sender = self.sender.clone().unwrap();
         self.spawn(async move {
             let mut devices = devices_lock.write().await;
             if let Some(device) = devices.get_mut(idx) {
@@ -350,7 +357,7 @@ impl App {
     fn get_or_refresh_devices(&mut self) {
         let client = self.client.clone();
         let devices_lock = Arc::clone(&self.devices);
-        let sender = self.sender.clone();
+        let sender = self.sender.clone().unwrap();
         self.spawn(async move {
             let block_devices = client.get_block_devices().await?;
             let mut new_devices = Vec::with_capacity(block_devices.len());
