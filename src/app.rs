@@ -450,7 +450,7 @@ impl Widget for &App {
             Constraint::Fill(3),
             Constraint::Fill(3),
             Constraint::Max(10),
-            Constraint::Fill(2),
+            Constraint::Max(10),
         ];
         let mut state = TableState::new().with_selected(self.selected_device_index + 1);
         StatefulWidget::render(
@@ -553,7 +553,7 @@ impl Display for DeviceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             DeviceState::Locked => "Locked",
-            DeviceState::UnmountedUnlocked => "Unlocked, unmounted",
+            DeviceState::UnmountedUnlocked => "Unlocked",
             DeviceState::Mounted => "Mounted",
             DeviceState::Unmounted => "Unmounted",
         };
