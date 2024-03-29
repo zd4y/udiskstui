@@ -1,9 +1,6 @@
 use std::{collections::VecDeque, fmt::Display, future::Future, sync::Arc, time::Duration};
 
-use color_eyre::{
-    eyre::{bail, Context},
-    Result,
-};
+use color_eyre::{eyre::Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
@@ -17,11 +14,7 @@ use ratatui::{
     },
     Frame,
 };
-use tokio::{
-    runtime::Runtime,
-    sync::mpsc::{self, error::TryRecvError, Receiver, Sender},
-    task::JoinHandle,
-};
+use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
     device::{Device, DeviceState},
@@ -40,10 +33,8 @@ pub struct App {
     exit: bool,
     exit_mount_point: Option<String>,
     print_on_exit: bool,
-    sender: Option<Sender<Message>>,
-    receiver: Receiver<Message>,
     runtime: Runtime,
-    tasks: VecDeque<JoinHandle<Result<()>>>,
+    tasks: VecDeque<JoinHandle<Result<Message>>>,
 }
 
 #[derive(Debug)]
@@ -68,7 +59,6 @@ pub enum Message {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let (sender, receiver) = mpsc::channel(10);
         let runtime = Runtime::new()?;
         let client = runtime.block_on(Client::new())?;
         let mut app = Self {
@@ -82,8 +72,6 @@ impl App {
             exit: false,
             exit_mount_point: None,
             print_on_exit: false,
-            sender: Some(sender),
-            receiver,
             runtime,
             tasks: VecDeque::new(),
         };
@@ -94,7 +82,6 @@ impl App {
     pub fn run(&mut self, terminal: &mut tui::Tui) -> Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.render_frame(frame))?;
-            self.receive_udisks_messages()?;
             self.check_finished_tasks()?;
             self.handle_events().wrap_err("handling events failed")?;
         }
@@ -108,19 +95,13 @@ impl App {
         // check remaining tasks
         while let Some(task) = self.tasks.pop_front() {
             match self.runtime.block_on(task)? {
-                Ok(()) => {}
+                Ok(msg) => self.handle_message(msg)?,
                 Err(err) => {
                     self.state_msg = Some(format!("Error: {err}"));
                     self.exit = false;
                     return self.run(terminal);
                 }
             }
-        }
-
-        // handle remaining messages
-        drop(self.sender.take());
-        while let Some(msg) = self.receiver.blocking_recv() {
-            self.handle_message(msg)?;
         }
 
         Ok(())
@@ -225,14 +206,6 @@ impl App {
         self.selected_device_index = 0;
     }
 
-    fn receive_udisks_messages(&mut self) -> Result<()> {
-        match self.receiver.try_recv() {
-            Ok(msg) => self.handle_message(msg),
-            Err(TryRecvError::Empty) => Ok(()),
-            Err(err) => bail!("failed receiving message: {}", err),
-        }
-    }
-
     fn handle_message(&mut self, msg: Message) -> Result<()> {
         match msg {
             Message::Devices(gui_devices, devices) => {
@@ -308,16 +281,17 @@ impl App {
     }
 
     fn mount(&mut self) -> Result<()> {
+        if self.devices.is_empty() {
+            return Ok(());
+        }
+
         let idx = self.selected_device_index;
         let devices = Arc::clone(&self.devices);
-        let sender = self.sender.clone().unwrap();
         let passphrase = self.passphrase.take();
         self.spawn(async move {
-            if let Some(device) = devices.get(idx) {
-                let msg = device.mount(idx, passphrase).await?;
-                sender.send(msg).await?;
-            }
-            Ok(())
+            let device = &devices[idx];
+            let msg = device.mount(idx, passphrase).await?;
+            Ok(msg)
         });
 
         self.state_msg = Some(format!("Mounting {}...", self.gui_devices[idx].name));
@@ -326,15 +300,16 @@ impl App {
     }
 
     fn unmount(&mut self) -> Result<()> {
+        if self.devices.is_empty() {
+            return Ok(());
+        }
+
         let idx = self.selected_device_index;
         let devices = Arc::clone(&self.devices);
-        let sender = self.sender.clone().unwrap();
         self.spawn(async move {
-            if let Some(device) = devices.get(idx) {
-                let msg = device.unmount(idx).await?;
-                sender.send(msg).await?;
-            }
-            Ok(())
+            let device = &devices[idx];
+            let msg = device.unmount(idx).await?;
+            Ok(msg)
         });
 
         self.state_msg = Some(format!(
@@ -358,7 +333,6 @@ impl App {
 
     fn get_or_refresh_devices(&mut self) {
         let client = self.client.clone();
-        let sender = self.sender.clone().unwrap();
         self.spawn(async move {
             let block_devices = client.get_block_devices().await?;
             let mut devices = Vec::with_capacity(block_devices.len());
@@ -369,36 +343,32 @@ impl App {
                 devices.push(Device::new(&client, block_device).await?);
             }
 
-            sender.send(Message::Devices(gui_devices, devices)).await?;
-
-            Ok(())
+            Ok(Message::Devices(gui_devices, devices))
         });
     }
 
     fn spawn<F>(&mut self, task: F)
     where
-        F: Future<Output = Result<()>> + Send + 'static,
+        F: Future<Output = Result<Message>> + Send + 'static,
     {
         self.tasks.push_back(self.runtime.spawn(task));
     }
 
     fn check_finished_tasks(&mut self) -> Result<()> {
-        let l = self.tasks.len();
-        let mut i = 0;
-        while let Some(task) = self.tasks.pop_front() {
-            if task.is_finished() {
-                match self.runtime.block_on(task)? {
-                    Ok(()) => {}
-                    Err(err) => {
-                        self.state_msg = Some(format!("Error: {err}"));
-                        self.exit = false;
+        for _ in 0..self.tasks.len() {
+            if let Some(task) = self.tasks.pop_front() {
+                if task.is_finished() {
+                    match self.runtime.block_on(task)? {
+                        Ok(msg) => self.handle_message(msg)?,
+                        Err(err) => {
+                            self.state_msg = Some(format!("Error: {err}"));
+                            self.exit = false;
+                        }
                     }
+                } else {
+                    self.tasks.push_back(task)
                 }
             } else {
-                self.tasks.push_back(task)
-            }
-            i += 1;
-            if i >= l {
                 break;
             }
         }
