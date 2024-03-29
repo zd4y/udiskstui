@@ -19,10 +19,7 @@ use ratatui::{
 };
 use tokio::{
     runtime::Runtime,
-    sync::{
-        mpsc::{self, error::TryRecvError, Receiver, Sender},
-        RwLock,
-    },
+    sync::mpsc::{self, error::TryRecvError, Receiver, Sender},
     task::JoinHandle,
 };
 
@@ -34,7 +31,7 @@ use crate::{
 
 pub struct App {
     client: Client,
-    devices: Arc<RwLock<Vec<Device>>>,
+    devices: Arc<Vec<Device>>,
     gui_devices: Vec<GuiDevice>,
     selected_device_index: usize,
     passphrase: Option<String>,
@@ -65,7 +62,7 @@ pub enum Message {
     UnlockedAndMounted(usize, String, String, String, String),
     AlreadyMounted(usize, String),
     AlreadyUnmounted(usize),
-    Devices(Vec<GuiDevice>),
+    Devices(Vec<GuiDevice>, Vec<Device>),
     PassphraseRequired(usize),
 }
 
@@ -77,7 +74,7 @@ impl App {
         let mut app = Self {
             client,
             gui_devices: Vec::new(),
-            devices: Arc::new(RwLock::new(Vec::new())),
+            devices: Arc::new(Vec::new()),
             selected_device_index: 0,
             passphrase: None,
             reading_passphrase: false,
@@ -238,8 +235,9 @@ impl App {
 
     fn handle_message(&mut self, msg: Message) -> Result<()> {
         match msg {
-            Message::Devices(devices) => {
-                self.gui_devices = devices;
+            Message::Devices(gui_devices, devices) => {
+                self.gui_devices = gui_devices;
+                self.devices = Arc::new(devices);
                 self.selected_device_index = 0;
                 self.state_msg = None;
                 self.exit_mount_point = None;
@@ -311,12 +309,11 @@ impl App {
 
     fn mount(&mut self) -> Result<()> {
         let idx = self.selected_device_index;
-        let devices_lock = self.devices.clone();
+        let devices = Arc::clone(&self.devices);
         let sender = self.sender.clone().unwrap();
         let passphrase = self.passphrase.take();
         self.spawn(async move {
-            let mut devices = devices_lock.write().await;
-            if let Some(device) = devices.get_mut(idx) {
+            if let Some(device) = devices.get(idx) {
                 let msg = device.mount(idx, passphrase).await?;
                 sender.send(msg).await?;
             }
@@ -330,11 +327,10 @@ impl App {
 
     fn unmount(&mut self) -> Result<()> {
         let idx = self.selected_device_index;
-        let devices_lock = self.devices.clone();
+        let devices = Arc::clone(&self.devices);
         let sender = self.sender.clone().unwrap();
         self.spawn(async move {
-            let mut devices = devices_lock.write().await;
-            if let Some(device) = devices.get_mut(idx) {
+            if let Some(device) = devices.get(idx) {
                 let msg = device.unmount(idx).await?;
                 sender.send(msg).await?;
             }
@@ -362,23 +358,18 @@ impl App {
 
     fn get_or_refresh_devices(&mut self) {
         let client = self.client.clone();
-        let devices_lock = Arc::clone(&self.devices);
         let sender = self.sender.clone().unwrap();
         self.spawn(async move {
             let block_devices = client.get_block_devices().await?;
-            let mut new_devices = Vec::with_capacity(block_devices.len());
+            let mut devices = Vec::with_capacity(block_devices.len());
             let mut gui_devices = Vec::with_capacity(block_devices.len());
 
             for block_device in block_devices {
                 gui_devices.push(GuiDevice::new(&client, &block_device).await?);
-                let device = Device::new(&client, block_device).await?;
-                new_devices.push(device);
+                devices.push(Device::new(&client, block_device).await?);
             }
 
-            let mut devices = devices_lock.write().await;
-            devices.clear();
-            *devices = new_devices;
-            sender.send(Message::Devices(gui_devices)).await?;
+            sender.send(Message::Devices(gui_devices, devices)).await?;
 
             Ok(())
         });
