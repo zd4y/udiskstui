@@ -2,7 +2,7 @@ use color_eyre::Result;
 use humansize::{format_size, DECIMAL};
 
 use crate::{
-    app::Message,
+    app::{GuiDeviceInfo, Message},
     udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
 };
 
@@ -59,10 +59,13 @@ impl Device {
                 let size = Self::get_size(&proxy).await?;
                 return Ok(Message::UnlockedAndMounted(
                     idx,
-                    mount_point,
-                    name,
-                    label,
-                    size,
+                    mount_point.clone(),
+                    GuiDeviceInfo {
+                        name,
+                        label,
+                        size,
+                        mount_point,
+                    },
                 ));
             }
         } else {
@@ -121,10 +124,15 @@ impl Device {
                     let name = Self::get_name(&proxy).await?;
                     let label = Self::get_label(&proxy).await?;
                     let size = Self::get_size(&proxy).await?;
-
-                    Ok(Message::UnmountedAndLocked(idx, name, label, size))
+                    let info = GuiDeviceInfo {
+                        name,
+                        label,
+                        size,
+                        mount_point: String::new(),
+                    };
+                    Ok(Message::UnmountedAndLocked(idx, info))
                 } else {
-                    Ok(Message::AlreadyUnmounted(idx))
+                    Ok(Message::AlreadyLocked(idx))
                 }
             }
         }
@@ -181,6 +189,6 @@ impl Device {
     }
 }
 
-fn dbus_u8_array_to_str(s: &[u8]) -> Result<&str, std::str::Utf8Error> {
+pub fn dbus_u8_array_to_str(s: &[u8]) -> Result<&str, std::str::Utf8Error> {
     std::str::from_utf8(&s[..s.len() - 1])
 }

@@ -17,9 +17,9 @@ use ratatui::{
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
-    device::{Device, DeviceState},
+    device::{dbus_u8_array_to_str, Device, DeviceState},
     tui,
-    udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy},
+    udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
 };
 
 pub struct App {
@@ -39,20 +39,27 @@ pub struct App {
 
 #[derive(Debug)]
 pub struct GuiDevice {
-    name: String,
-    label: String,
-    size: String,
+    info: GuiDeviceInfo,
     state: DeviceState,
+}
+
+#[derive(Debug)]
+pub struct GuiDeviceInfo {
+    pub name: String,
+    pub label: String,
+    pub size: String,
+    pub mount_point: String,
 }
 
 pub enum Message {
     Mounted(usize, String),
     Unmounted(usize),
     Locked(usize),
-    UnmountedAndLocked(usize, String, String, String),
-    UnlockedAndMounted(usize, String, String, String, String),
+    UnmountedAndLocked(usize, GuiDeviceInfo),
+    UnlockedAndMounted(usize, String, GuiDeviceInfo),
     AlreadyMounted(usize, String),
     AlreadyUnmounted(usize),
+    AlreadyLocked(usize),
     Devices(Vec<GuiDevice>, Vec<Device>),
     PassphraseRequired(usize),
 }
@@ -220,56 +227,66 @@ impl App {
             Message::Mounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Mounted;
-                self.state_msg = Some(format!("Mounted {} at {}", device.name, mount_point));
+                device.info.mount_point = mount_point.clone();
+                self.state_msg = Some(format!("Mounted {} at {}", device.info.name, mount_point));
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
             Message::Unmounted(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Unmounted;
-                self.state_msg = Some(format!("Unmounted {}", device.name));
+                device.info.mount_point = String::new();
+                self.state_msg = Some(format!("Unmounted {}", device.info.name));
                 Ok(())
             }
             Message::Locked(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Locked;
-                self.state_msg = Some(format!("Locked {}", device.name));
+                device.info.mount_point = String::new();
+                self.state_msg = Some(format!("Locked {}", device.info.name));
                 Ok(())
             }
-            Message::UnmountedAndLocked(idx, name, label, size) => {
+            Message::UnmountedAndLocked(idx, device_info) => {
                 let device = &mut self.gui_devices[idx];
-                device.name = name;
-                device.label = label;
-                device.size = size;
+                device.info = device_info;
                 device.state = DeviceState::Locked;
-                self.state_msg = Some(format!("Unmounted and locked {}", device.name));
+                self.state_msg = Some(format!("Unmounted and locked {}", device.info.name));
                 Ok(())
             }
-            Message::UnlockedAndMounted(idx, mount_point, name, label, size) => {
+            Message::UnlockedAndMounted(idx, mount_point, device_info) => {
                 let device = &mut self.gui_devices[idx];
-                device.name = name;
-                device.label = label;
-                device.size = size;
+                device.info = device_info;
                 device.state = DeviceState::Mounted;
                 self.state_msg = Some(format!(
                     "Unlocked and mounted {} at {}",
-                    device.name, mount_point
+                    device.info.name, mount_point
                 ));
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
             Message::AlreadyMounted(idx, mount_point) => {
-                let device = &self.gui_devices[idx];
+                let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Mounted;
+                device.info.mount_point = mount_point.clone();
                 self.state_msg = Some(format!(
                     "Already mounted {} at {}",
-                    device.name, mount_point
+                    device.info.name, mount_point
                 ));
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
             Message::AlreadyUnmounted(idx) => {
-                let device = &self.gui_devices[idx];
-                self.state_msg = Some(format!("Already unmounted {}", device.name));
+                let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Unmounted;
+                device.info.mount_point = String::new();
+                self.state_msg = Some(format!("Already unmounted {}", device.info.name));
+                Ok(())
+            }
+            Message::AlreadyLocked(idx) => {
+                let device = &mut self.gui_devices[idx];
+                device.state = DeviceState::Locked;
+                device.info.mount_point = String::new();
+                self.state_msg = Some(format!("Already unmounted and locked {}", device.info.name));
                 Ok(())
             }
             Message::PassphraseRequired(idx) => {
@@ -294,7 +311,7 @@ impl App {
             Ok(msg)
         });
 
-        self.state_msg = Some(format!("Mounting {}...", self.gui_devices[idx].name));
+        self.state_msg = Some(format!("Mounting {}...", self.gui_devices[idx].info.name));
 
         Ok(())
     }
@@ -314,7 +331,7 @@ impl App {
 
         self.state_msg = Some(format!(
             "Unmounting {}...",
-            &self.gui_devices[self.selected_device_index].name
+            &self.gui_devices[self.selected_device_index].info.name
         ));
         Ok(())
     }
@@ -388,7 +405,7 @@ impl Widget for &App {
             .split(area);
 
         let header = Row::new(
-            ["Name", "Label", "Size", "Status"]
+            ["Name", "Label", "Mount Point", "Size", "Status"]
                 .into_iter()
                 .map(Cell::from),
         )
@@ -398,9 +415,10 @@ impl Widget for &App {
             .iter()
             .map(|d| {
                 Row::new([
-                    Cell::new(d.name.as_str()),
-                    Cell::new(d.label.as_str()),
-                    Cell::new(d.size.as_str()),
+                    Cell::new(d.info.name.as_str()),
+                    Cell::new(d.info.label.as_str()),
+                    Cell::new(d.info.mount_point.as_str()),
+                    Cell::new(d.info.size.as_str()),
                     Cell::new(d.state.to_string()),
                 ])
             })
@@ -408,8 +426,9 @@ impl Widget for &App {
         let mut rows = vec![Row::new([Cell::default(); 0])];
         rows.append(&mut devices_rows);
         let widths = [
-            Constraint::Fill(3),
-            Constraint::Fill(3),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
             Constraint::Max(10),
             Constraint::Max(10),
         ];
@@ -478,8 +497,18 @@ impl Widget for &App {
 
 impl GuiDevice {
     async fn new(client: &Client, block_device: &BlockDevice) -> Result<Self> {
-        let path = match block_device.kind {
-            BlockDeviceKind::Filesystem => block_device.path.clone(),
+        let (path, mount_point) = match block_device.kind {
+            BlockDeviceKind::Filesystem => {
+                let filesystem_proxy = FilesystemProxy::builder(client.conn())
+                    .path(&block_device.path)?
+                    .build()
+                    .await?;
+                let mount_point = match filesystem_proxy.mount_points().await?.first() {
+                    Some(mount_point) => dbus_u8_array_to_str(mount_point)?.to_string(),
+                    None => String::new(),
+                };
+                (block_device.path.clone(), mount_point)
+            }
             BlockDeviceKind::Encrypted => {
                 let encrypted_proxy = EncryptedProxy::builder(client.conn())
                     .path(&block_device.path)?
@@ -487,9 +516,17 @@ impl GuiDevice {
                     .await?;
                 let cleartext_device = encrypted_proxy.cleartext_device().await?;
                 if cleartext_device.len() > 1 {
-                    cleartext_device
+                    let filesystem_proxy = FilesystemProxy::builder(client.conn())
+                        .path(&cleartext_device)?
+                        .build()
+                        .await?;
+                    let mount_point = match filesystem_proxy.mount_points().await?.first() {
+                        Some(mount_point) => dbus_u8_array_to_str(mount_point)?.to_string(),
+                        None => String::new(),
+                    };
+                    (cleartext_device, mount_point)
                 } else {
-                    block_device.path.clone()
+                    (block_device.path.clone(), String::new())
                 }
             }
         };
@@ -502,9 +539,12 @@ impl GuiDevice {
         let size = Device::get_size(&proxy).await?;
         let state = Device::get_state(client, block_device).await?;
         Ok(Self {
-            name,
-            label,
-            size,
+            info: GuiDeviceInfo {
+                name,
+                label,
+                size,
+                mount_point,
+            },
             state,
         })
     }
