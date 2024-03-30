@@ -159,6 +159,9 @@ impl App {
                     self.reading_passphrase = false;
                     self.mount()?;
                 }
+                KeyCode::Backspace => {
+                    passphrase.pop();
+                }
                 _ => {}
             }
             return Ok(());
