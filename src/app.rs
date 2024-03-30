@@ -31,6 +31,7 @@ pub struct App {
     reading_passphrase: bool,
     state_msg: Option<String>,
     exit: bool,
+    exit_after_passphrase: bool,
     exit_mount_point: Option<String>,
     print_on_exit: bool,
     runtime: Runtime,
@@ -77,6 +78,7 @@ impl App {
             reading_passphrase: false,
             state_msg: None,
             exit: false,
+            exit_after_passphrase: false,
             exit_mount_point: None,
             print_on_exit: false,
             runtime,
@@ -109,6 +111,10 @@ impl App {
                     return self.run(terminal);
                 }
             }
+        }
+
+        if !self.exit {
+            return self.run(terminal);
         }
 
         Ok(())
@@ -158,6 +164,10 @@ impl App {
                 KeyCode::Enter => {
                     self.reading_passphrase = false;
                     self.mount()?;
+                    if self.exit_after_passphrase {
+                        self.exit = true;
+                        self.exit_after_passphrase = false;
+                    }
                 }
                 KeyCode::Backspace => {
                     passphrase.pop();
@@ -296,6 +306,10 @@ impl App {
             Message::PassphraseRequired(idx) => {
                 self.reading_passphrase = true;
                 self.selected_device_index = idx;
+                if self.exit {
+                    self.exit_after_passphrase = true;
+                }
+                self.exit = false;
                 Ok(())
             }
         }
@@ -346,6 +360,7 @@ impl App {
         self.reading_passphrase = false;
         self.state_msg = None;
         self.exit = false;
+        self.exit_after_passphrase = false;
         self.exit_mount_point = None;
         self.print_on_exit = false;
         self.get_or_refresh_devices();
