@@ -153,6 +153,7 @@ impl App {
                 KeyCode::Esc => {
                     self.passphrase = None;
                     self.reading_passphrase = false;
+                    self.state_msg = None;
                 }
                 KeyCode::Enter => {
                     self.reading_passphrase = false;
