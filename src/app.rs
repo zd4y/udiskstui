@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, fmt::Display, future::Future, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow, collections::VecDeque, ffi::CStr, fmt::Display, future::Future, sync::Arc,
+    time::Duration,
+};
 
 use color_eyre::{eyre::Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -17,7 +20,7 @@ use ratatui::{
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
-    device::{dbus_u8_array_to_str, Device, DeviceState},
+    device::{Device, DeviceState},
     tui,
     udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
 };
@@ -523,10 +526,12 @@ impl GuiDevice {
                     .build()
                     .await?;
                 let mount_point = match filesystem_proxy.mount_points().await?.first() {
-                    Some(mount_point) => dbus_u8_array_to_str(mount_point)?.to_string(),
+                    Some(mount_point) => CStr::from_bytes_with_nul(mount_point)?
+                        .to_string_lossy()
+                        .to_string(),
                     None => String::new(),
                 };
-                (block_device.path.clone(), mount_point)
+                (Cow::Borrowed(&block_device.path), mount_point)
             }
             BlockDeviceKind::Encrypted => {
                 let encrypted_proxy = EncryptedProxy::builder(client.conn())
@@ -540,17 +545,19 @@ impl GuiDevice {
                         .build()
                         .await?;
                     let mount_point = match filesystem_proxy.mount_points().await?.first() {
-                        Some(mount_point) => dbus_u8_array_to_str(mount_point)?.to_string(),
+                        Some(mount_point) => CStr::from_bytes_with_nul(mount_point)?
+                            .to_string_lossy()
+                            .to_string(),
                         None => String::new(),
                     };
-                    (cleartext_device, mount_point)
+                    (Cow::Owned(cleartext_device), mount_point)
                 } else {
-                    (block_device.path.clone(), String::new())
+                    (Cow::Borrowed(&block_device.path), String::new())
                 }
             }
         };
         let proxy = BlockProxy::builder(client.conn())
-            .path(path)?
+            .path(path.as_ref())?
             .build()
             .await?;
         let name = Device::get_name(&proxy).await?;

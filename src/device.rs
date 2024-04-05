@@ -1,3 +1,5 @@
+use std::{borrow::Cow, ffi::{CStr, CString}};
+
 use color_eyre::Result;
 use humansize::{format_size, DECIMAL};
 
@@ -37,7 +39,7 @@ impl Device {
                 .await?;
             let cleartext_device = proxy.cleartext_device().await?;
             if cleartext_device.len() > 1 {
-                cleartext_device
+                Cow::Owned(cleartext_device)
             } else {
                 let passphrase = match passphrase {
                     Some(p) => p,
@@ -69,15 +71,17 @@ impl Device {
                 ));
             }
         } else {
-            self.block_device.path.clone()
+            Cow::Borrowed(&self.block_device.path)
         };
 
         let proxy = FilesystemProxy::builder(self.client.conn())
-            .path(object_path)?
+            .path(object_path.as_ref())?
             .build()
             .await?;
         if let Some(mount_point) = proxy.mount_points().await?.first() {
-            let mount_point = dbus_u8_array_to_str(mount_point)?.to_string();
+            let mount_point = CStr::from_bytes_with_nul(mount_point)?
+                .to_string_lossy()
+                .to_string();
             Ok(Message::AlreadyMounted(idx, mount_point))
         } else {
             let mount_point = proxy.mount(Default::default()).await?;
@@ -140,7 +144,7 @@ impl Device {
 
     pub async fn get_name(proxy: &BlockProxy<'_>) -> Result<String> {
         let p = proxy.device().await?;
-        Ok(dbus_u8_array_to_str(&p)?.to_string())
+        Ok(CString::from_vec_with_nul(p)?.to_string_lossy().to_string())
     }
 
     pub async fn get_label(proxy: &BlockProxy<'_>) -> Result<String> {
@@ -187,8 +191,4 @@ impl Device {
             }
         }
     }
-}
-
-pub fn dbus_u8_array_to_str(s: &[u8]) -> Result<&str, std::str::Utf8Error> {
-    std::str::from_utf8(&s[..s.len() - 1])
 }
