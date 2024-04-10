@@ -10,10 +10,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style, Stylize},
     symbols::border,
-    text::Line,
+    text::{Line, Text},
     widgets::{
-        block::Title, Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table,
-        TableState, Widget,
+        Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
     },
     Frame,
 };
@@ -27,8 +26,8 @@ use crate::{
 
 pub struct App {
     client: Client,
-    devices: Arc<Vec<Device>>,
-    gui_devices: Vec<GuiDevice>,
+    devices: Arc<[Device]>,
+    gui_devices: Box<[GuiDevice]>,
     selected_device_index: usize,
     passphrase: Option<String>,
     reading_passphrase: bool,
@@ -66,6 +65,7 @@ pub enum Message {
     AlreadyLocked(usize),
     Devices(Vec<GuiDevice>, Vec<Device>),
     PassphraseRequired(usize),
+    Ejected(usize),
 }
 
 impl App {
@@ -74,8 +74,8 @@ impl App {
         let client = runtime.block_on(Client::new())?;
         let mut app = Self {
             client,
-            gui_devices: Vec::new(),
-            devices: Arc::new(Vec::new()),
+            gui_devices: Box::new([]),
+            devices: Arc::new([]),
             selected_device_index: 0,
             passphrase: None,
             reading_passphrase: false,
@@ -187,6 +187,7 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.first_device(),
             KeyCode::Char('m') => self.mount()?,
             KeyCode::Char('u') => self.unmount()?,
+            KeyCode::Char('e') => self.eject()?,
             KeyCode::Char('r') => self.refresh()?,
             KeyCode::Enter => {
                 self.mount()?;
@@ -233,10 +234,9 @@ impl App {
     fn handle_message(&mut self, msg: Message) -> Result<()> {
         match msg {
             Message::Devices(gui_devices, devices) => {
-                self.gui_devices = gui_devices;
-                self.devices = Arc::new(devices);
+                self.gui_devices = gui_devices.into();
+                self.devices = devices.into();
                 self.selected_device_index = 0;
-                self.state_msg = None;
                 self.exit_mount_point = None;
                 self.print_on_exit = false;
                 Ok(())
@@ -315,6 +315,11 @@ impl App {
                 self.exit = false;
                 Ok(())
             }
+            Message::Ejected(idx) => {
+                self.refresh()?;
+                self.state_msg = Some(format!("Ejected {}", self.gui_devices[idx].info.name));
+                Ok(())
+            }
         }
     }
 
@@ -333,7 +338,6 @@ impl App {
         });
 
         self.state_msg = Some(format!("Mounting {}...", self.gui_devices[idx].info.name));
-
         Ok(())
     }
 
@@ -352,8 +356,25 @@ impl App {
 
         self.state_msg = Some(format!(
             "Unmounting {}...",
-            &self.gui_devices[self.selected_device_index].info.name
+            &self.gui_devices[idx].info.name
         ));
+        Ok(())
+    }
+
+    fn eject(&mut self) -> Result<()> {
+        if self.devices.is_empty() {
+            return Ok(());
+        }
+
+        let idx = self.selected_device_index;
+        let devices = Arc::clone(&self.devices);
+        self.spawn(async move {
+            let device = &devices[idx];
+            let msg = device.eject(idx).await?;
+            Ok(msg)
+        });
+
+        self.state_msg = Some(format!("Ejecting {}...", &self.gui_devices[idx].info.name));
         Ok(())
     }
 
@@ -422,7 +443,7 @@ impl Widget for &App {
             .constraints([
                 Constraint::Fill(1),
                 Constraint::Length(3),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(area);
 
@@ -469,24 +490,30 @@ impl Widget for &App {
                 .block(Block::default().borders(Borders::ALL))
                 .render(layout[1], buf);
         }
-        Block::new()
-            .title(
-                Title::from(Line::from(vec![
-                    "m".bold().blue(),
-                    " Mount".into(),
-                    " | ".dark_gray(),
-                    "u".bold().blue(),
-                    " Unmount".into(),
-                    " | ".dark_gray(),
-                    "<Enter>".bold().blue(),
-                    " Mount and exit printing mount point".into(),
-                    " | ".dark_gray(),
-                    "r".bold().blue(),
-                    " Refresh".into(),
-                ]))
-                .alignment(Alignment::Center),
-            )
-            .render(layout[2], buf);
+        Text::from(vec![
+            Line::from(vec![
+                "m".bold().blue(),
+                " Mount".into(),
+                " | ".dark_gray(),
+                "u".bold().blue(),
+                " Unmount".into(),
+                " | ".dark_gray(),
+                "e".bold().blue(),
+                " Eject".into(),
+                " | ".dark_gray(),
+                "r".bold().blue(),
+                " Refresh".into(),
+            ]),
+            Line::from(vec![
+                "<Enter>".bold().blue(),
+                " Mount and exit printing mount point".into(),
+                " | ".dark_gray(),
+                "q".bold().blue(),
+                " Quit".into(),
+            ]),
+        ])
+        .alignment(Alignment::Center)
+        .render(layout[2], buf);
 
         if self.reading_passphrase {
             let popup_layout = Layout::default()

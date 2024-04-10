@@ -104,7 +104,7 @@ trait Block {
     fn hint_ignore(&self) -> zbus::Result<bool>;
 
     #[zbus(property)]
-    fn drive(&self) -> zbus::Result<ObjectPath>;
+    fn drive(&self) -> zbus::Result<OwnedObjectPath>;
 
     #[zbus(property)]
     fn device(&self) -> zbus::Result<Vec<u8>>;
@@ -116,7 +116,7 @@ trait Block {
     fn size(&self) -> zbus::Result<u64>;
 
     #[zbus(property)]
-    fn crypto_backing_device(&self) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    fn crypto_backing_device(&self) -> zbus::Result<OwnedObjectPath>;
 }
 
 #[proxy(
@@ -156,4 +156,15 @@ trait Encrypted {
 
     #[zbus(property)]
     fn cleartext_device(&self) -> zbus::Result<OwnedObjectPath>;
+}
+
+#[proxy(
+    interface = "org.freedesktop.UDisks2.Drive",
+    default_service = "org.freedesktop.UDisks2"
+)]
+trait Drive {
+    fn eject(
+        &self,
+        options: std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<()>;
 }

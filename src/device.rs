@@ -1,11 +1,17 @@
-use std::{borrow::Cow, ffi::{CStr, CString}};
+use std::{
+    borrow::Cow,
+    ffi::{CStr, CString},
+};
 
 use color_eyre::Result;
 use humansize::{format_size, DECIMAL};
 
 use crate::{
     app::{GuiDeviceInfo, Message},
-    udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
+    udisks2::{
+        BlockDevice, BlockDeviceKind, BlockProxy, Client, DriveProxy, EncryptedProxy,
+        FilesystemProxy,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -140,6 +146,20 @@ impl Device {
                 }
             }
         }
+    }
+
+    pub async fn eject(&self, idx: usize) -> Result<Message> {
+        let proxy = BlockProxy::builder(self.client.conn())
+            .path(&self.block_device.path)?
+            .build()
+            .await?;
+        let drive = proxy.drive().await?;
+        let proxy = DriveProxy::builder(self.client.conn())
+            .path(drive)?
+            .build()
+            .await?;
+        proxy.eject(Default::default()).await?;
+        Ok(Message::Ejected(idx))
     }
 
     pub async fn get_name(proxy: &BlockProxy<'_>) -> Result<String> {
