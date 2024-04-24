@@ -16,6 +16,7 @@ use ratatui::{
     },
     Frame,
 };
+use secstr::SecStr;
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
@@ -330,7 +331,7 @@ impl App {
 
         let idx = self.selected_device_index;
         let devices = Arc::clone(&self.devices);
-        let passphrase = self.passphrase.take();
+        let passphrase = self.passphrase.take().map(|p| SecStr::new(p.into_bytes()));
         self.spawn(async move {
             let device = &devices[idx];
             let msg = device.mount(idx, passphrase).await?;

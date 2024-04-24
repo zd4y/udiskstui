@@ -1,10 +1,12 @@
 use std::{
     borrow::Cow,
     ffi::{CStr, CString},
+    str,
 };
 
 use color_eyre::Result;
 use humansize::{format_size, DECIMAL};
+use secstr::SecStr;
 
 use crate::{
     app::{GuiDeviceInfo, Message},
@@ -37,7 +39,7 @@ impl Device {
         })
     }
 
-    pub async fn mount(&self, idx: usize, passphrase: Option<String>) -> Result<Message> {
+    pub async fn mount(&self, idx: usize, passphrase: Option<SecStr>) -> Result<Message> {
         let object_path = if let BlockDeviceKind::Encrypted = self.block_device.kind {
             let proxy = EncryptedProxy::builder(self.client.conn())
                 .path(&self.block_device.path)?
@@ -47,11 +49,14 @@ impl Device {
             if cleartext_device.len() > 1 {
                 Cow::Owned(cleartext_device)
             } else {
-                let passphrase = match passphrase {
+                let mut passphrase = match passphrase {
                     Some(p) => p,
                     None => return Ok(Message::PassphraseRequired(idx)),
                 };
-                let cleartext_device = proxy.unlock(&passphrase, Default::default()).await?;
+                let cleartext_device = proxy
+                    .unlock(str::from_utf8(passphrase.unsecure())?, Default::default())
+                    .await?;
+                passphrase.zero_out();
                 let proxy = FilesystemProxy::builder(self.client.conn())
                     .path(&cleartext_device)?
                     .build()
