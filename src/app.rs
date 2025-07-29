@@ -1,9 +1,17 @@
 use std::{
-    borrow::Cow, collections::VecDeque, ffi::CStr, fmt::Display, future::Future, sync::Arc,
+    borrow::Cow,
+    collections::VecDeque,
+    ffi::CStr,
+    fmt::Display,
+    future::Future,
+    sync::{mpsc, Arc},
     time::Duration,
 };
 
-use color_eyre::{eyre::Context, Result};
+use color_eyre::{
+    eyre::{eyre, Context},
+    Result,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
@@ -16,13 +24,14 @@ use ratatui::{
     },
     Frame,
 };
-use secstr::SecStr;
-use tokio::{runtime::Runtime, task::JoinHandle};
+use secrecy::SecretString;
+use tokio::{runtime::Runtime, sync::oneshot, task::JoinHandle};
 
 use crate::{
     device::{Device, DeviceState},
     tui,
     udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
+    AgentMessage,
 };
 
 pub struct App {
@@ -30,8 +39,8 @@ pub struct App {
     devices: Arc<[Device]>,
     gui_devices: Box<[GuiDevice]>,
     selected_device_index: usize,
-    passphrase: Option<String>,
-    reading_passphrase: bool,
+    state: AppState,
+    pending_state: VecDeque<AppState>,
     state_msg: Option<String>,
     exit: bool,
     exit_after_passphrase: bool,
@@ -39,6 +48,8 @@ pub struct App {
     print_on_exit: bool,
     runtime: Runtime,
     tasks: VecDeque<JoinHandle<Result<Message>>>,
+    agent_receiver: mpsc::Receiver<AgentMessage>,
+    glib_cancel: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Debug)]
@@ -69,8 +80,21 @@ pub enum Message {
     Ejected(usize),
 }
 
+enum AppState {
+    DisksList,
+    ReadingPassphrase(String),
+    ReadingAgentPassword {
+        name: String,
+        password: String,
+        respond_to: Option<oneshot::Sender<SecretString>>,
+    },
+}
+
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(
+        agent_receiver: mpsc::Receiver<AgentMessage>,
+        glib_cancel: oneshot::Sender<()>,
+    ) -> Result<Self> {
         let runtime = Runtime::new()?;
         let client = runtime.block_on(Client::new())?;
         let mut app = Self {
@@ -78,8 +102,8 @@ impl App {
             gui_devices: Box::new([]),
             devices: Arc::new([]),
             selected_device_index: 0,
-            passphrase: None,
-            reading_passphrase: false,
+            state: AppState::DisksList,
+            pending_state: VecDeque::new(),
             state_msg: None,
             exit: false,
             exit_after_passphrase: false,
@@ -87,6 +111,8 @@ impl App {
             print_on_exit: false,
             runtime,
             tasks: VecDeque::new(),
+            agent_receiver,
+            glib_cancel: Some(glib_cancel),
         };
         app.get_or_refresh_devices();
         Ok(app)
@@ -96,7 +122,15 @@ impl App {
         while !self.exit {
             terminal.draw(|frame| self.render_frame(frame))?;
             self.check_finished_tasks()?;
-            self.handle_events().wrap_err("handling events failed")?;
+            self.handle_events().wrap_err("failed handling events")?;
+            self.handle_agent_messages()
+                .wrap_err("failed handling agent messages")?;
+
+            if let AppState::DisksList = self.state {
+                if let Some(state) = self.pending_state.pop_front() {
+                    self.state = state;
+                }
+            }
         }
         terminal.draw(|frame| {
             frame.render_widget(
@@ -120,6 +154,8 @@ impl App {
         if !self.exit {
             return self.run(terminal);
         }
+
+        self.glib_cancel.take().unwrap().send(()).ok();
 
         Ok(())
     }
@@ -150,24 +186,43 @@ impl App {
         Ok(())
     }
 
-    fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<()> {
-        if self.reading_passphrase {
-            if self.passphrase.is_none() {
-                self.passphrase = Some("".to_string());
+    fn handle_agent_messages(&mut self) -> Result<()> {
+        let Ok(msg) = self.agent_receiver.try_recv() else {
+            return Ok(());
+        };
+
+        match msg {
+            AgentMessage::ChooseUser { users, respond_to } => {
+                // FIXME: this should ask the user...
+                respond_to.send(Some((users[0].clone(), 0))).unwrap();
             }
-            let passphrase = self.passphrase.as_mut().unwrap();
+            AgentMessage::RequestPassword { name, respond_to } => {
+                self.add_next_state(AppState::ReadingAgentPassword {
+                    name,
+                    password: "".to_string(),
+                    respond_to: Some(respond_to),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<()> {
+        if let AppState::ReadingPassphrase(passphrase) = &self.state {
+            let mut passphrase = passphrase.to_string();
             match key_event.code {
                 KeyCode::Char(c) => {
                     passphrase.push(c);
+                    self.state = AppState::ReadingPassphrase(passphrase);
                 }
                 KeyCode::Esc => {
-                    self.passphrase = None;
-                    self.reading_passphrase = false;
+                    self.state = AppState::DisksList;
                     self.state_msg = None;
                 }
                 KeyCode::Enter => {
-                    self.reading_passphrase = false;
-                    self.mount()?;
+                    self.state = AppState::DisksList;
+                    self.mount(Some(SecretString::from(passphrase)))?;
                     if self.exit_after_passphrase {
                         self.exit = true;
                         self.exit_after_passphrase = false;
@@ -175,23 +230,67 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     passphrase.pop();
+                    self.state = AppState::ReadingPassphrase(passphrase);
                 }
                 _ => {}
             }
             return Ok(());
         }
+
+        if let AppState::ReadingAgentPassword {
+            name,
+            password,
+            respond_to,
+        } = &mut self.state
+        {
+            let mut password = password.to_string();
+            let name = name.clone();
+            let respond_to = respond_to.take();
+            match key_event.code {
+                KeyCode::Char(c) => {
+                    password.push(c);
+                    self.state = AppState::ReadingAgentPassword {
+                        name,
+                        password,
+                        respond_to,
+                    };
+                }
+                KeyCode::Esc => {
+                    self.state = AppState::DisksList;
+                    self.state_msg = None;
+                }
+                KeyCode::Enter => {
+                    self.state = AppState::DisksList;
+                    respond_to
+                        .unwrap()
+                        .send(SecretString::from(password))
+                        .map_err(|_| eyre!("failed to send"))?;
+                }
+                KeyCode::Backspace => {
+                    password.pop();
+                    self.state = AppState::ReadingAgentPassword {
+                        name,
+                        password,
+                        respond_to,
+                    };
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match key_event.code {
             KeyCode::Char('q') | KeyCode::Esc => self.exit(),
             KeyCode::Char('j') | KeyCode::Down => self.next_device(),
             KeyCode::Char('k') | KeyCode::Up => self.prev_device(),
             KeyCode::Char('G') | KeyCode::End => self.last_device(),
             KeyCode::Char('g') | KeyCode::Home => self.first_device(),
-            KeyCode::Char('m') => self.mount()?,
+            KeyCode::Char('m') => self.mount(None)?,
             KeyCode::Char('u') => self.unmount()?,
             KeyCode::Char('e') => self.eject()?,
             KeyCode::Char('r') => self.refresh()?,
             KeyCode::Enter => {
-                self.mount()?;
+                self.mount(None)?;
                 self.print_on_exit = true;
                 self.exit();
             }
@@ -308,7 +407,7 @@ impl App {
                 Ok(())
             }
             Message::PassphraseRequired(idx) => {
-                self.reading_passphrase = true;
+                self.add_next_state(AppState::ReadingPassphrase("".to_string()));
                 self.selected_device_index = idx;
                 if self.exit {
                     self.exit_after_passphrase = true;
@@ -324,14 +423,13 @@ impl App {
         }
     }
 
-    fn mount(&mut self) -> Result<()> {
+    fn mount(&mut self, passphrase: Option<SecretString>) -> Result<()> {
         if self.devices.is_empty() {
             return Ok(());
         }
 
         let idx = self.selected_device_index;
         let devices = Arc::clone(&self.devices);
-        let passphrase = self.passphrase.take().map(|p| SecStr::new(p.into_bytes()));
         self.spawn(async move {
             let device = &devices[idx];
             let msg = device.mount(idx, passphrase).await?;
@@ -381,8 +479,8 @@ impl App {
 
     fn refresh(&mut self) -> Result<()> {
         self.selected_device_index = 0;
-        self.passphrase = None;
-        self.reading_passphrase = false;
+        self.state = AppState::DisksList;
+        self.pending_state = VecDeque::new();
         self.state_msg = None;
         self.exit = false;
         self.exit_after_passphrase = false;
@@ -390,6 +488,25 @@ impl App {
         self.print_on_exit = false;
         self.get_or_refresh_devices();
         Ok(())
+    }
+
+    fn add_next_state(&mut self, state: AppState) {
+        match self.state {
+            AppState::DisksList => {}
+            _ => {
+                self.pending_state.push_back(state);
+                return;
+            }
+        }
+        match self.pending_state.pop_front() {
+            Some(pending) => {
+                self.state = pending;
+                self.pending_state.push_back(state);
+            }
+            None => {
+                self.state = state;
+            }
+        }
     }
 
     fn get_or_refresh_devices(&mut self) {
@@ -467,7 +584,7 @@ impl Widget for &App {
                 ])
             })
             .collect();
-        let mut rows = vec![Row::new([Cell::default(); 0])];
+        let mut rows = vec![Row::default()];
         rows.append(&mut devices_rows);
         let widths = [
             Constraint::Fill(1),
@@ -516,7 +633,7 @@ impl Widget for &App {
         .alignment(Alignment::Center)
         .render(layout[2], buf);
 
-        if self.reading_passphrase {
+        if let AppState::ReadingPassphrase(_) = self.state {
             let popup_layout = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -536,6 +653,38 @@ impl Widget for &App {
             Clear.render(popup_layout[1], buf);
             Block::new()
                 .title(" Enter passphrase for unlocking device ")
+                .title_alignment(Alignment::Center)
+                .bold()
+                .borders(Borders::ALL)
+                .border_set(border::THICK)
+                .render(popup_layout[1], buf);
+        }
+
+        if let AppState::ReadingAgentPassword {
+            name,
+            password: _,
+            respond_to: _,
+        } = &self.state
+        {
+            let popup_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Fill(1),
+                    Constraint::Length(46),
+                    Constraint::Fill(1),
+                ])
+                .split(area);
+            let popup_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Fill(1),
+                    Constraint::Length(4),
+                    Constraint::Fill(2),
+                ])
+                .split(popup_layout[1]);
+            Clear.render(popup_layout[1], buf);
+            Block::new()
+                .title(format!(" Enter password for user {name} "))
                 .title_alignment(Alignment::Center)
                 .bold()
                 .borders(Borders::ALL)

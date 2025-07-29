@@ -1,12 +1,11 @@
 use std::{
     borrow::Cow,
     ffi::{CStr, CString},
-    str,
 };
 
 use color_eyre::Result;
 use humansize::{format_size, DECIMAL};
-use secstr::SecStr;
+use secrecy::{zeroize::Zeroize, ExposeSecret, SecretString};
 
 use crate::{
     app::{GuiDeviceInfo, Message},
@@ -39,7 +38,7 @@ impl Device {
         })
     }
 
-    pub async fn mount(&self, idx: usize, passphrase: Option<SecStr>) -> Result<Message> {
+    pub async fn mount(&self, idx: usize, passphrase: Option<SecretString>) -> Result<Message> {
         let object_path = if let BlockDeviceKind::Encrypted = self.block_device.kind {
             let proxy = EncryptedProxy::builder(self.client.conn())
                 .path(&self.block_device.path)?
@@ -54,9 +53,9 @@ impl Device {
                     None => return Ok(Message::PassphraseRequired(idx)),
                 };
                 let cleartext_device = proxy
-                    .unlock(str::from_utf8(passphrase.unsecure())?, Default::default())
+                    .unlock(passphrase.expose_secret(), Default::default())
                     .await?;
-                passphrase.zero_out();
+                passphrase.zeroize();
                 let proxy = FilesystemProxy::builder(self.client.conn())
                     .path(&cleartext_device)?
                     .build()
