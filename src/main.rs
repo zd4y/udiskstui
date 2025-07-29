@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::mpsc, thread};
 
-use app::App;
 use color_eyre::Result;
 
 mod app;
@@ -15,6 +14,7 @@ use mypolkit::MyPolkit;
 use polkit_agent_rs::{gio, polkit::UnixProcess, traits::ListenerExt, RegisterFlags};
 use secrecy::SecretString;
 use tokio::sync::oneshot;
+use tui::Tui;
 
 const OBJECT_PATH: &str = "/org/udiskstui/PolicyKit1/AuthenticationAgent";
 
@@ -66,23 +66,12 @@ fn main() -> Result<()> {
         main_loop_2.quit();
     });
 
-    thread::spawn(move || start_tui(tui_receiver, glib_cancel_send).unwrap());
+    thread::spawn(move || {
+        let mut tui = Tui::new(tui_receiver, glib_cancel_send).unwrap();
+        tui.start().unwrap();
+    });
 
     main_loop.run();
-
-    Ok(())
-}
-
-fn start_tui(
-    receiver: mpsc::Receiver<AgentMessage>,
-    glib_cancel_send: oneshot::Sender<()>,
-) -> Result<()> {
-    let mut app = App::new(receiver, glib_cancel_send)?;
-    let mut terminal = tui::init()?;
-    let result = app.run(&mut terminal);
-    tui::restore()?;
-    result?;
-    app.print_exit_mount_point();
 
     Ok(())
 }

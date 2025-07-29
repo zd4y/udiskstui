@@ -2,60 +2,41 @@ use std::{
     borrow::Cow,
     collections::VecDeque,
     ffi::CStr,
-    fmt::Display,
     future::Future,
     sync::{mpsc, Arc},
-    time::Duration,
 };
 
-use color_eyre::{
-    eyre::{eyre, Context},
-    Result,
-};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::{
-    buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style, Stylize},
-    symbols::border,
-    text::{Line, Text},
-    widgets::{
-        Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
-    },
-    Frame,
-};
+use color_eyre::{eyre::Context, Result};
 use secrecy::SecretString;
 use tokio::{runtime::Runtime, sync::oneshot, task::JoinHandle};
 
 use crate::{
-    device::{Device, DeviceState},
-    tui,
+    device::{Device, DeviceMessage, DeviceState},
     udisks2::{BlockDevice, BlockDeviceKind, BlockProxy, Client, EncryptedProxy, FilesystemProxy},
     AgentMessage,
 };
 
 pub struct App {
-    client: Client,
-    devices: Arc<[Device]>,
-    gui_devices: Box<[GuiDevice]>,
-    selected_device_index: usize,
-    state: AppState,
-    pending_state: VecDeque<AppState>,
-    state_msg: Option<String>,
-    exit: bool,
-    exit_after_passphrase: bool,
-    exit_mount_point: Option<String>,
-    print_on_exit: bool,
-    runtime: Runtime,
-    tasks: VecDeque<JoinHandle<Result<Message>>>,
-    agent_receiver: mpsc::Receiver<AgentMessage>,
-    glib_cancel: Option<oneshot::Sender<()>>,
+    pub client: Client,
+    pub devices: Arc<[Device]>,
+    pub gui_devices: Box<[GuiDevice]>,
+    pub selected_device_index: usize,
+    pub state: AppState,
+    pub pending_state: VecDeque<AppState>,
+    pub state_msg: Option<String>,
+    pub exit: bool,
+    pub exit_after_passphrase: bool,
+    pub exit_mount_point: Option<String>,
+    pub print_on_exit: bool,
+    pub runtime: Runtime,
+    pub tasks: VecDeque<JoinHandle<Result<DeviceMessage>>>,
+    pub agent_receiver: mpsc::Receiver<AgentMessage>,
 }
 
 #[derive(Debug)]
 pub struct GuiDevice {
-    info: GuiDeviceInfo,
-    state: DeviceState,
+    pub info: GuiDeviceInfo,
+    pub state: DeviceState,
 }
 
 #[derive(Debug)]
@@ -66,21 +47,7 @@ pub struct GuiDeviceInfo {
     pub mount_point: String,
 }
 
-pub enum Message {
-    Mounted(usize, String),
-    Unmounted(usize),
-    Locked(usize),
-    UnmountedAndLocked(usize, GuiDeviceInfo),
-    UnlockedAndMounted(usize, String, GuiDeviceInfo),
-    AlreadyMounted(usize, String),
-    AlreadyUnmounted(usize),
-    AlreadyLocked(usize),
-    Devices(Vec<GuiDevice>, Vec<Device>),
-    PassphraseRequired(usize),
-    Ejected(usize),
-}
-
-enum AppState {
+pub enum AppState {
     DisksList,
     ReadingPassphrase(String),
     ReadingAgentPassword {
@@ -91,10 +58,7 @@ enum AppState {
 }
 
 impl App {
-    pub fn new(
-        agent_receiver: mpsc::Receiver<AgentMessage>,
-        glib_cancel: oneshot::Sender<()>,
-    ) -> Result<Self> {
+    pub fn new(agent_receiver: mpsc::Receiver<AgentMessage>) -> Result<Self> {
         let runtime = Runtime::new()?;
         let client = runtime.block_on(Client::new())?;
         let mut app = Self {
@@ -112,50 +76,21 @@ impl App {
             runtime,
             tasks: VecDeque::new(),
             agent_receiver,
-            glib_cancel: Some(glib_cancel),
         };
         app.get_or_refresh_devices();
         Ok(app)
     }
 
-    pub fn run(&mut self, terminal: &mut tui::Tui) -> Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.render_frame(frame))?;
-            self.check_finished_tasks()?;
-            self.handle_events().wrap_err("failed handling events")?;
-            self.handle_agent_messages()
-                .wrap_err("failed handling agent messages")?;
+    pub fn tick(&mut self) -> Result<()> {
+        self.check_finished_tasks()?;
+        self.handle_agent_messages()
+            .wrap_err("failed handling agent messages")?;
 
-            if let AppState::DisksList = self.state {
-                if let Some(state) = self.pending_state.pop_front() {
-                    self.state = state;
-                }
+        if let AppState::DisksList = self.state {
+            if let Some(state) = self.pending_state.pop_front() {
+                self.state = state;
             }
         }
-        terminal.draw(|frame| {
-            frame.render_widget(
-                Paragraph::new(self.state_msg.as_deref().unwrap_or("exiting...")),
-                frame.size(),
-            )
-        })?;
-
-        // check remaining tasks
-        while let Some(task) = self.tasks.pop_front() {
-            match self.runtime.block_on(task)? {
-                Ok(msg) => self.handle_message(msg)?,
-                Err(err) => {
-                    self.state_msg = Some(format!("Error: {err}"));
-                    self.exit = false;
-                    return self.run(terminal);
-                }
-            }
-        }
-
-        if !self.exit {
-            return self.run(terminal);
-        }
-
-        self.glib_cancel.take().unwrap().send(()).ok();
 
         Ok(())
     }
@@ -168,22 +103,6 @@ impl App {
         if let Some(mount_point) = &self.exit_mount_point {
             println!("{}", mount_point);
         }
-    }
-
-    fn render_frame(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.size())
-    }
-
-    fn handle_events(&mut self) -> Result<()> {
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)?;
-                }
-                _ => {}
-            }
-        };
-        Ok(())
     }
 
     fn handle_agent_messages(&mut self) -> Result<()> {
@@ -208,102 +127,11 @@ impl App {
         Ok(())
     }
 
-    fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<()> {
-        if let AppState::ReadingPassphrase(passphrase) = &self.state {
-            let mut passphrase = passphrase.to_string();
-            match key_event.code {
-                KeyCode::Char(c) => {
-                    passphrase.push(c);
-                    self.state = AppState::ReadingPassphrase(passphrase);
-                }
-                KeyCode::Esc => {
-                    self.state = AppState::DisksList;
-                    self.state_msg = None;
-                }
-                KeyCode::Enter => {
-                    self.state = AppState::DisksList;
-                    self.mount(Some(SecretString::from(passphrase)))?;
-                    if self.exit_after_passphrase {
-                        self.exit = true;
-                        self.exit_after_passphrase = false;
-                    }
-                }
-                KeyCode::Backspace => {
-                    passphrase.pop();
-                    self.state = AppState::ReadingPassphrase(passphrase);
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if let AppState::ReadingAgentPassword {
-            name,
-            password,
-            respond_to,
-        } = &mut self.state
-        {
-            let mut password = password.to_string();
-            let name = name.clone();
-            let respond_to = respond_to.take();
-            match key_event.code {
-                KeyCode::Char(c) => {
-                    password.push(c);
-                    self.state = AppState::ReadingAgentPassword {
-                        name,
-                        password,
-                        respond_to,
-                    };
-                }
-                KeyCode::Esc => {
-                    self.state = AppState::DisksList;
-                    self.state_msg = None;
-                }
-                KeyCode::Enter => {
-                    self.state = AppState::DisksList;
-                    respond_to
-                        .unwrap()
-                        .send(SecretString::from(password))
-                        .map_err(|_| eyre!("failed to send"))?;
-                }
-                KeyCode::Backspace => {
-                    password.pop();
-                    self.state = AppState::ReadingAgentPassword {
-                        name,
-                        password,
-                        respond_to,
-                    };
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        match key_event.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.exit(),
-            KeyCode::Char('j') | KeyCode::Down => self.next_device(),
-            KeyCode::Char('k') | KeyCode::Up => self.prev_device(),
-            KeyCode::Char('G') | KeyCode::End => self.last_device(),
-            KeyCode::Char('g') | KeyCode::Home => self.first_device(),
-            KeyCode::Char('m') => self.mount(None)?,
-            KeyCode::Char('u') => self.unmount()?,
-            KeyCode::Char('e') => self.eject()?,
-            KeyCode::Char('r') => self.refresh()?,
-            KeyCode::Enter => {
-                self.mount(None)?;
-                self.print_on_exit = true;
-                self.exit();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn exit(&mut self) {
+    pub fn exit(&mut self) {
         self.exit = true;
     }
 
-    fn next_device(&mut self) {
+    pub fn next_device(&mut self) {
         if self.gui_devices.is_empty() {
             return;
         }
@@ -313,13 +141,13 @@ impl App {
         }
     }
 
-    fn prev_device(&mut self) {
+    pub fn prev_device(&mut self) {
         if self.selected_device_index > 0 {
             self.selected_device_index -= 1;
         }
     }
 
-    fn last_device(&mut self) {
+    pub fn last_device(&mut self) {
         if self.gui_devices.is_empty() {
             return;
         }
@@ -327,13 +155,13 @@ impl App {
         self.selected_device_index = self.gui_devices.len() - 1;
     }
 
-    fn first_device(&mut self) {
+    pub fn first_device(&mut self) {
         self.selected_device_index = 0;
     }
 
-    fn handle_message(&mut self, msg: Message) -> Result<()> {
+    pub fn handle_message(&mut self, msg: DeviceMessage) -> Result<()> {
         match msg {
-            Message::Devices(gui_devices, devices) => {
+            DeviceMessage::Devices(gui_devices, devices) => {
                 self.gui_devices = gui_devices.into();
                 self.devices = devices.into();
                 self.selected_device_index = 0;
@@ -341,7 +169,7 @@ impl App {
                 self.print_on_exit = false;
                 Ok(())
             }
-            Message::Mounted(idx, mount_point) => {
+            DeviceMessage::Mounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Mounted;
                 device.info.mount_point = mount_point.clone();
@@ -349,28 +177,28 @@ impl App {
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
-            Message::Unmounted(idx) => {
+            DeviceMessage::Unmounted(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Unmounted;
                 device.info.mount_point = String::new();
                 self.state_msg = Some(format!("Unmounted {}", device.info.name));
                 Ok(())
             }
-            Message::Locked(idx) => {
+            DeviceMessage::Locked(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Locked;
                 device.info.mount_point = String::new();
                 self.state_msg = Some(format!("Locked {}", device.info.name));
                 Ok(())
             }
-            Message::UnmountedAndLocked(idx, device_info) => {
+            DeviceMessage::UnmountedAndLocked(idx, device_info) => {
                 let device = &mut self.gui_devices[idx];
                 device.info = device_info;
                 device.state = DeviceState::Locked;
                 self.state_msg = Some(format!("Unmounted and locked {}", device.info.name));
                 Ok(())
             }
-            Message::UnlockedAndMounted(idx, mount_point, device_info) => {
+            DeviceMessage::UnlockedAndMounted(idx, mount_point, device_info) => {
                 let device = &mut self.gui_devices[idx];
                 device.info = device_info;
                 device.state = DeviceState::Mounted;
@@ -381,7 +209,7 @@ impl App {
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
-            Message::AlreadyMounted(idx, mount_point) => {
+            DeviceMessage::AlreadyMounted(idx, mount_point) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Mounted;
                 device.info.mount_point = mount_point.clone();
@@ -392,21 +220,21 @@ impl App {
                 self.exit_mount_point = Some(mount_point);
                 Ok(())
             }
-            Message::AlreadyUnmounted(idx) => {
+            DeviceMessage::AlreadyUnmounted(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Unmounted;
                 device.info.mount_point = String::new();
                 self.state_msg = Some(format!("Already unmounted {}", device.info.name));
                 Ok(())
             }
-            Message::AlreadyLocked(idx) => {
+            DeviceMessage::AlreadyLocked(idx) => {
                 let device = &mut self.gui_devices[idx];
                 device.state = DeviceState::Locked;
                 device.info.mount_point = String::new();
                 self.state_msg = Some(format!("Already unmounted and locked {}", device.info.name));
                 Ok(())
             }
-            Message::PassphraseRequired(idx) => {
+            DeviceMessage::PassphraseRequired(idx) => {
                 self.add_next_state(AppState::ReadingPassphrase("".to_string()));
                 self.selected_device_index = idx;
                 if self.exit {
@@ -415,7 +243,7 @@ impl App {
                 self.exit = false;
                 Ok(())
             }
-            Message::Ejected(idx) => {
+            DeviceMessage::Ejected(idx) => {
                 self.refresh()?;
                 self.state_msg = Some(format!("Ejected {}", self.gui_devices[idx].info.name));
                 Ok(())
@@ -423,7 +251,7 @@ impl App {
         }
     }
 
-    fn mount(&mut self, passphrase: Option<SecretString>) -> Result<()> {
+    pub fn mount(&mut self, passphrase: Option<SecretString>) -> Result<()> {
         if self.devices.is_empty() {
             return Ok(());
         }
@@ -440,7 +268,7 @@ impl App {
         Ok(())
     }
 
-    fn unmount(&mut self) -> Result<()> {
+    pub fn unmount(&mut self) -> Result<()> {
         if self.devices.is_empty() {
             return Ok(());
         }
@@ -460,7 +288,7 @@ impl App {
         Ok(())
     }
 
-    fn eject(&mut self) -> Result<()> {
+    pub fn eject(&mut self) -> Result<()> {
         if self.devices.is_empty() {
             return Ok(());
         }
@@ -477,7 +305,7 @@ impl App {
         Ok(())
     }
 
-    fn refresh(&mut self) -> Result<()> {
+    pub fn refresh(&mut self) -> Result<()> {
         self.selected_device_index = 0;
         self.state = AppState::DisksList;
         self.pending_state = VecDeque::new();
@@ -490,7 +318,7 @@ impl App {
         Ok(())
     }
 
-    fn add_next_state(&mut self, state: AppState) {
+    pub fn add_next_state(&mut self, state: AppState) {
         match self.state {
             AppState::DisksList => {}
             _ => {
@@ -509,7 +337,7 @@ impl App {
         }
     }
 
-    fn get_or_refresh_devices(&mut self) {
+    pub fn get_or_refresh_devices(&mut self) {
         let client = self.client.clone();
         self.spawn(async move {
             let block_devices = client.get_block_devices().await?;
@@ -521,13 +349,13 @@ impl App {
                 devices.push(Device::new(&client, block_device).await?);
             }
 
-            Ok(Message::Devices(gui_devices, devices))
+            Ok(DeviceMessage::Devices(gui_devices, devices))
         });
     }
 
-    fn spawn<F>(&mut self, task: F)
+    pub fn spawn<F>(&mut self, task: F)
     where
-        F: Future<Output = Result<Message>> + Send + 'static,
+        F: Future<Output = Result<DeviceMessage>> + Send + 'static,
     {
         self.tasks.push_back(self.runtime.spawn(task));
     }
@@ -551,146 +379,6 @@ impl App {
             }
         }
         Ok(())
-    }
-}
-
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(3),
-                Constraint::Length(2),
-            ])
-            .split(area);
-
-        let header = Row::new(
-            ["Name", "Label", "Mount Point", "Size", "Status"]
-                .into_iter()
-                .map(Cell::from),
-        )
-        .blue();
-        let mut devices_rows: Vec<Row> = self
-            .gui_devices
-            .iter()
-            .map(|d| {
-                Row::new([
-                    Cell::new(d.info.name.as_str()),
-                    Cell::new(d.info.label.as_str()),
-                    Cell::new(d.info.mount_point.as_str()),
-                    Cell::new(d.info.size.as_str()),
-                    Cell::new(d.state.to_string()),
-                ])
-            })
-            .collect();
-        let mut rows = vec![Row::default()];
-        rows.append(&mut devices_rows);
-        let widths = [
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Max(10),
-            Constraint::Max(10),
-        ];
-        let mut state = TableState::new().with_selected(self.selected_device_index + 1);
-        StatefulWidget::render(
-            Table::new(rows, widths)
-                .header(header)
-                .highlight_style(Style::new().blue().add_modifier(Modifier::REVERSED)),
-            layout[0],
-            buf,
-            &mut state,
-        );
-
-        if let Some(msg) = self.state_msg.as_deref() {
-            Paragraph::new(msg)
-                .block(Block::default().borders(Borders::ALL))
-                .render(layout[1], buf);
-        }
-        Text::from(vec![
-            Line::from(vec![
-                "m".bold().blue(),
-                " Mount".into(),
-                " | ".dark_gray(),
-                "u".bold().blue(),
-                " Unmount".into(),
-                " | ".dark_gray(),
-                "e".bold().blue(),
-                " Eject".into(),
-                " | ".dark_gray(),
-                "r".bold().blue(),
-                " Refresh".into(),
-            ]),
-            Line::from(vec![
-                "<Enter>".bold().blue(),
-                " Mount and exit printing mount point".into(),
-                " | ".dark_gray(),
-                "q".bold().blue(),
-                " Quit".into(),
-            ]),
-        ])
-        .alignment(Alignment::Center)
-        .render(layout[2], buf);
-
-        if let AppState::ReadingPassphrase(_) = self.state {
-            let popup_layout = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(46),
-                    Constraint::Fill(1),
-                ])
-                .split(area);
-            let popup_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(4),
-                    Constraint::Fill(2),
-                ])
-                .split(popup_layout[1]);
-            Clear.render(popup_layout[1], buf);
-            Block::new()
-                .title(" Enter passphrase for unlocking device ")
-                .title_alignment(Alignment::Center)
-                .bold()
-                .borders(Borders::ALL)
-                .border_set(border::THICK)
-                .render(popup_layout[1], buf);
-        }
-
-        if let AppState::ReadingAgentPassword {
-            name,
-            password: _,
-            respond_to: _,
-        } = &self.state
-        {
-            let popup_layout = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(46),
-                    Constraint::Fill(1),
-                ])
-                .split(area);
-            let popup_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(4),
-                    Constraint::Fill(2),
-                ])
-                .split(popup_layout[1]);
-            Clear.render(popup_layout[1], buf);
-            Block::new()
-                .title(format!(" Enter password for user {name} "))
-                .title_alignment(Alignment::Center)
-                .bold()
-                .borders(Borders::ALL)
-                .border_set(border::THICK)
-                .render(popup_layout[1], buf);
-        }
     }
 }
 
@@ -750,17 +438,5 @@ impl GuiDevice {
             },
             state,
         })
-    }
-}
-
-impl Display for DeviceState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            DeviceState::Locked => "Locked",
-            DeviceState::UnmountedUnlocked => "Unlocked",
-            DeviceState::Mounted => "Mounted",
-            DeviceState::Unmounted => "Unmounted",
-        };
-        write!(f, "{}", s)
     }
 }

@@ -9,7 +9,7 @@ pub fn install_hooks() -> color_eyre::Result<()> {
 
     let panic_hook = panic_hook.into_panic_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        tui::restore().unwrap();
+        tui::Tui::restore().unwrap();
         panic_hook(panic_info);
     }));
 

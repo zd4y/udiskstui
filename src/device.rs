@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     ffi::{CStr, CString},
+    fmt::Display,
 };
 
 use color_eyre::Result;
@@ -8,7 +9,7 @@ use humansize::{format_size, DECIMAL};
 use secrecy::{zeroize::Zeroize, ExposeSecret, SecretString};
 
 use crate::{
-    app::{GuiDeviceInfo, Message},
+    app::{GuiDevice, GuiDeviceInfo},
     udisks2::{
         BlockDevice, BlockDeviceKind, BlockProxy, Client, DriveProxy, EncryptedProxy,
         FilesystemProxy,
@@ -29,6 +30,20 @@ pub enum DeviceState {
     Unmounted,
 }
 
+pub enum DeviceMessage {
+    Mounted(usize, String),
+    Unmounted(usize),
+    Locked(usize),
+    UnmountedAndLocked(usize, GuiDeviceInfo),
+    UnlockedAndMounted(usize, String, GuiDeviceInfo),
+    AlreadyMounted(usize, String),
+    AlreadyUnmounted(usize),
+    AlreadyLocked(usize),
+    Devices(Vec<GuiDevice>, Vec<Device>),
+    PassphraseRequired(usize),
+    Ejected(usize),
+}
+
 impl Device {
     pub async fn new(client: &Client, block_device: BlockDevice) -> Result<Self> {
         let client = client.clone();
@@ -38,7 +53,11 @@ impl Device {
         })
     }
 
-    pub async fn mount(&self, idx: usize, passphrase: Option<SecretString>) -> Result<Message> {
+    pub async fn mount(
+        &self,
+        idx: usize,
+        passphrase: Option<SecretString>,
+    ) -> Result<DeviceMessage> {
         let object_path = if let BlockDeviceKind::Encrypted = self.block_device.kind {
             let proxy = EncryptedProxy::builder(self.client.conn())
                 .path(&self.block_device.path)?
@@ -50,7 +69,7 @@ impl Device {
             } else {
                 let mut passphrase = match passphrase {
                     Some(p) => p,
-                    None => return Ok(Message::PassphraseRequired(idx)),
+                    None => return Ok(DeviceMessage::PassphraseRequired(idx)),
                 };
                 let cleartext_device = proxy
                     .unlock(passphrase.expose_secret(), Default::default())
@@ -69,7 +88,7 @@ impl Device {
                 let name = Self::get_name(&proxy).await?;
                 let label = Self::get_label(&proxy).await?;
                 let size = Self::get_size(&proxy).await?;
-                return Ok(Message::UnlockedAndMounted(
+                return Ok(DeviceMessage::UnlockedAndMounted(
                     idx,
                     mount_point.clone(),
                     GuiDeviceInfo {
@@ -92,14 +111,14 @@ impl Device {
             let mount_point = CStr::from_bytes_with_nul(mount_point)?
                 .to_string_lossy()
                 .to_string();
-            Ok(Message::AlreadyMounted(idx, mount_point))
+            Ok(DeviceMessage::AlreadyMounted(idx, mount_point))
         } else {
             let mount_point = proxy.mount(Default::default()).await?;
-            Ok(Message::Mounted(idx, mount_point))
+            Ok(DeviceMessage::Mounted(idx, mount_point))
         }
     }
 
-    pub async fn unmount(&self, idx: usize) -> Result<Message> {
+    pub async fn unmount(&self, idx: usize) -> Result<DeviceMessage> {
         match self.block_device.kind {
             BlockDeviceKind::Filesystem => {
                 let proxy = FilesystemProxy::builder(self.client.conn())
@@ -107,10 +126,10 @@ impl Device {
                     .build()
                     .await?;
                 if proxy.mount_points().await?.is_empty() {
-                    Ok(Message::AlreadyUnmounted(idx))
+                    Ok(DeviceMessage::AlreadyUnmounted(idx))
                 } else {
                     proxy.unmount(Default::default()).await?;
-                    Ok(Message::Unmounted(idx))
+                    Ok(DeviceMessage::Unmounted(idx))
                 }
             }
             BlockDeviceKind::Encrypted => {
@@ -126,7 +145,7 @@ impl Device {
                         .await?;
                     if filesystem_proxy.mount_points().await?.is_empty() {
                         proxy.lock(Default::default()).await?;
-                        return Ok(Message::Locked(idx));
+                        return Ok(DeviceMessage::Locked(idx));
                     }
                     filesystem_proxy.unmount(Default::default()).await?;
                     proxy.lock(Default::default()).await?;
@@ -144,15 +163,15 @@ impl Device {
                         size,
                         mount_point: String::new(),
                     };
-                    Ok(Message::UnmountedAndLocked(idx, info))
+                    Ok(DeviceMessage::UnmountedAndLocked(idx, info))
                 } else {
-                    Ok(Message::AlreadyLocked(idx))
+                    Ok(DeviceMessage::AlreadyLocked(idx))
                 }
             }
         }
     }
 
-    pub async fn eject(&self, idx: usize) -> Result<Message> {
+    pub async fn eject(&self, idx: usize) -> Result<DeviceMessage> {
         let proxy = BlockProxy::builder(self.client.conn())
             .path(&self.block_device.path)?
             .build()
@@ -163,7 +182,7 @@ impl Device {
             .build()
             .await?;
         proxy.eject(Default::default()).await?;
-        Ok(Message::Ejected(idx))
+        Ok(DeviceMessage::Ejected(idx))
     }
 
     pub async fn get_name(proxy: &BlockProxy<'_>) -> Result<String> {
@@ -214,5 +233,17 @@ impl Device {
                 }
             }
         }
+    }
+}
+
+impl Display for DeviceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            DeviceState::Locked => "Locked",
+            DeviceState::UnmountedUnlocked => "Unlocked",
+            DeviceState::Mounted => "Mounted",
+            DeviceState::Unmounted => "Unmounted",
+        };
+        write!(f, "{}", s)
     }
 }
