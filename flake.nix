@@ -10,20 +10,25 @@
       let
         pkgs = import nixpkgs { inherit system; };
         naersk-lib = pkgs.callPackage naersk { };
+        nativeBuildInputs = with pkgs; [
+          glib
+          polkit
+          pkg-config
+        ];
       in
       {
-        packages.default = naersk-lib.buildPackage ./.;
+        packages.default = naersk-lib.buildPackage {
+          inherit nativeBuildInputs;
+          src = ./.;
+        };
         devShells.default = with pkgs; mkShell {
+          inherit nativeBuildInputs;
           buildInputs = [
             cargo
             rustc
             rustfmt
             pre-commit
             rustPackages.clippy
-
-            glib
-            polkit
-            pkg-config
           ];
           RUST_SRC_PATH = rustPlatform.rustLibSrc;
         };
